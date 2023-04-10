@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import * as foo from 'node:dns';
 import { createRequire } from 'node:module';
 import dep from './dep-esm.mjs';
+import nm from 'from-npm';
 
 const require = createRequire(import.meta.url);
 require('./dep-cjs');

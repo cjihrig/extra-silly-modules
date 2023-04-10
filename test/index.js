@@ -1,6 +1,6 @@
 'use strict';
 const assert = require('node:assert');
-const { createRequire } = require('node:module');
+const { createRequire, isBuiltin } = require('node:module');
 const path = require('node:path');
 const { test } = require('node:test');
 const {
@@ -11,7 +11,9 @@ const {
 const {
   createSourceTextModule,
   createSyntheticModule,
-  run
+  hookRequire,
+  run,
+  specifierToPath
 } = require('../lib');
 const fixturesDir = path.join(__dirname, '..', 'fixtures');
 
@@ -60,16 +62,42 @@ test('can run ES modules', async () => {
   assert.strictEqual(globalThis.dep_esm, undefined);
 });
 
-test('can run CJS modules', async () => {
+test('can run CJS modules', async (t) => {
+  const restore = hookRequire(function beforeHook(id) {
+    if (isBuiltin(id)) {
+      return;
+    }
+
+    const absolutePath = specifierToPath(id, this.id);
+
+    // This evicts the module from the require cache if it already exists.
+    // Note: This does not clean up children references to the deleted module.
+    // It's likely not a big deal for most cases, but it is a leak. The child
+    // references can be cleaned up, but it is expensive and involves walking
+    // the entire require() cache. See the DEP0144 documentation for how to do
+    // it.
+    delete require.cache[absolutePath];
+  });
+
+  t.after(() => {
+    restore();
+  });
+
   const fixture = path.join(fixturesDir, 'basic-cjs.js');
   const context1 = createContext({ console, require: createRequire(fixture) });
   const context2 = createContext({ console, require: createRequire(fixture) });
+
+  // TODO(cjihrig): There is a bug related to CJS. Everything require()'ed from
+  // the entrypoint happens in the main context. This means that in the
+  // following assertions:
+  // - basic_cjs (the entrypoint) has the correct globalThis and counts.
+  // - dep_cjs (a dependency) has the main context globalThis and wrong counts.
+  globalThis.dep_cjs = 0;
 
   // This fixture increments counters on the context's globalThis.
   let mod = await run(fixture, { context: context1 });
   assert.strictEqual(mod.context.basic_cjs, 1);
 
-  // TODO(cjihrig): This is a bug. dep-cjs.js has the wrong globalThis.
   assert.strictEqual(mod.context.dep_cjs, undefined);
   assert.strictEqual(globalThis.dep_cjs, 1);
 
@@ -77,9 +105,8 @@ test('can run CJS modules', async () => {
   mod = await run(fixture, { context: mod.context });
   assert.strictEqual(mod.context.basic_cjs, 2);
 
-  // TODO(cjihrig): Same bug as above.
   assert.strictEqual(mod.context.dep_cjs, undefined);
-  assert.strictEqual(globalThis.dep_cjs, 1);
+  assert.strictEqual(globalThis.dep_cjs, 2);
 
   // Running the fixture again in a new context yields a fresh counter.
   mod = await run(fixture, { context: context2 });
@@ -88,7 +115,6 @@ test('can run CJS modules', async () => {
   // Verify that the outer context is not changed.
   assert.strictEqual(globalThis.basic_cjs, undefined);
 
-  // TODO(cjihrig): Same bug as above.
   assert.strictEqual(mod.context.dep_cjs, undefined);
-  assert.strictEqual(globalThis.dep_cjs, 1);
+  assert.strictEqual(globalThis.dep_cjs, 3);
 });
